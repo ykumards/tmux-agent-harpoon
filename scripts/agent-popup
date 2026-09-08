@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+[[ $# == 3 ]] || exit 1
+cwd=$(tmux display-message -p -t "$1" '#{pane_current_path}') || exit 1
+printf -v picker '%q' "$HARPOON_DIR/scripts/agent-picker"
+exec tmux display-popup -E -c "$3" \
+  -w "$(option @agent-picker-width 90%)" \
+  -h "$(option @agent-picker-height 75%)" \
+  -T ' Agent Harpoon ' -d "$cwd" \
+  -e "AH_ORIGIN=$1" -e "AH_SESSION=$2" -e "AH_CLIENT=$3" \
+  -e "AH_CWD=$cwd" "$picker"

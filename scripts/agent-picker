@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Search-first fzf popup. Discovery and workspace creation are separate helpers.
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+SRC="$HARPOON_DIR/src/agent-scan.c"
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/agent-harpoon"
+BIN="$CACHE/agent-scan"
+if [[ ! -x "$BIN" || "$SRC" -nt "$BIN" ]]; then
+  mkdir -p "$CACHE" || exit 1
+  temporary=$(mktemp "$CACHE/agent-scan.XXXXXX") || exit 1
+  if ! cc -O2 -Wall -Wextra -o "$temporary" "$SRC"; then
+    rm -f "$temporary"; fail 'Could not build the scanner. Install a C compiler.'; exit 1
+  fi
+  chmod +x "$temporary"
+  mv -f "$temporary" "$BIN" || exit 1
+fi
+export AGENT_PICKER_AGENTS
+AGENT_PICKER_AGENTS=$(option @agent-picker-agents 'claude|codex|opencode|aider|pi|goose|amp|gemini')
+
+case "${1:-}" in
+  --rows) exec "$BIN" ;;
+  --list)
+    rows=$("$BIN") || exit 1
+    if [[ -z "$rows" ]]; then printf 'No agents. Open the picker and press Ctrl+n to create one.\n'; else
+      awk -F '\t' '{printf "%-4s %s\n", $2, $4}' <<<"$rows"
+    fi
+    exit 0 ;;
+  '') ;;
+  *) fail 'Usage: agent-picker [--list|--rows]'; exit 1 ;;
+esac
+command -v fzf >/dev/null 2>&1 || { fail 'fzf is required.'; exit 1; }
+export AH_ORIGIN=${AH_ORIGIN:-${TMUX_PANE:-}}
+export AH_SESSION=${AH_SESSION:-$(tmux display-message -p -t "$AH_ORIGIN" '#{session_id}')}
+export AH_CLIENT=${AH_CLIENT:-}
+# Pin the origin now: selection and popup working-directory changes cannot alter it.
+export AH_PREVIEW="$HARPOON_DIR/scripts/agent-preview"
+export AH_SCAN="$BIN"
+export AH_SEARCH="$HARPOON_DIR/scripts/agent-search"
+AH_RUNTIME=$(mktemp -d "${TMPDIR:-/tmp}/agent-harpoon.XXXXXX") || exit 1
+export AH_INDEX="$AH_RUNTIME/agents.tsv"
+export AH_GREP_ROOT="$AH_RUNTIME/grep"
+trap 'rm -rf "$AH_RUNTIME"' EXIT
+trap 'exit 130' INT TERM
+query=
+header=
+footer='enter open   ^n new   ^t name
+^g grep   ^r refresh   esc close'
+while :; do
+  "$AH_SEARCH" refresh "$AH_INDEX" > /dev/null || exit 1
+  # The helper ranks complete metadata. The UI shows only the compact row.
+  result=$("$AH_SEARCH" filter "$AH_INDEX" "$query" | picker_ui \
+    --disabled --delimiter='\t' --with-nth=4 --ansi --no-sort \
+    --prompt='› ' --query="$query" --print-query --expect=ctrl-n,ctrl-t,ctrl-g \
+    --header="$header" --footer="$footer" \
+    --preview='"$AH_PREVIEW" {2}' \
+    --preview-window="right,$(option @agent-picker-preview-width 70%),border-left,noinfo,follow" \
+    --bind='change:untrack-current+reload("$AH_SEARCH" filter "$AH_INDEX" {q}),ctrl-r:track-current+reload("$AH_SEARCH" refresh "$AH_INDEX" {q})+refresh-preview,ctrl-j:down,ctrl-k:up,ctrl-d:preview-half-page-down,ctrl-u:preview-half-page-up')
+  status=$?
+  query=$(printf '%s\n' "$result" | sed -n '1p')
+  key=$(printf '%s\n' "$result" | sed -n '2p')
+  # Expected keys still work when the current query has no matching rows.
+  if (( status != 0 )) && [[ "$key" != ctrl-n && "$key" != ctrl-g && "$key" != ctrl-t ]]; then exit 0; fi
+  if [[ "$key" == ctrl-n ]]; then
+    choice=$(launchers | picker_ui --prompt='New agent › ' \
+      --header="$(tmux display-message -p -t "$AH_ORIGIN" '#{pane_current_path}')" \
+      --footer='enter launch   esc back' --bind='ctrl-j:down,ctrl-k:up') || continue
+    if created=$("$HARPOON_DIR/scripts/agent-workspace" --create "$choice" 2>&1); then
+      IFS=$'\t' read -r pane session <<<"$created"
+      jump_to "$pane" "$session" off || true
+      exit 0
+    else
+      header="$(printf '%s\n' "$created" | tail -n 2)"
+      continue
+    fi
+  fi
+  if [[ "$key" == ctrl-g ]]; then
+    if ! command -v rg >/dev/null 2>&1; then header='Install ripgrep (rg) for conversation search.'; continue; fi
+    if match=$("$HARPOON_DIR/scripts/agent-grep"); then
+      IFS=$'\t' read -r pane target line display file <<<"$match"
+      if jump_error=$(jump_to "$pane" "${target%%:*}" "$(option @agent-picker-zoom off)" 2>&1); then exit 0; fi
+      header="$jump_error"
+    fi
+    continue
+  fi
+  row=$(printf '%s\n' "$result" | sed -n '3p')
+  [[ -n "$row" ]] || continue
+  IFS=$'\t' read -r state pane target display search title <<<"$row"
+  if [[ "$key" == ctrl-t ]]; then
+    if "$HARPOON_DIR/scripts/agent-rename" "$pane" "$title"; then query=; header=; fi
+    continue
+  fi
+  if jump_error=$(jump_to "$pane" "${target%%:*}" "$(option @agent-picker-zoom off)" 2>&1); then exit 0; fi
+  header="$jump_error"
+done

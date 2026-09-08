@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -uo pipefail
+pane=${1:-}
+case "$pane" in
+  %*[!0-9]*|'') printf 'No matching agents.\n\nCtrl+n  New agent workspace\nCtrl+r  Refresh\n' ;;
+  %*) tmux capture-pane -e -p -S -200 -t "$pane" 2>/dev/null || printf 'This pane has closed. Press Ctrl+r to refresh.\n' ;;
+  *) printf 'Ctrl+n  New agent workspace\n' ;;
+esac

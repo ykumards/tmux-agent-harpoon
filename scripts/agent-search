@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Metadata ranking and ephemeral pane-scrollback grep. Bash 3.2 compatible.
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+
+refresh_index() {
+  local index=$1 temporary
+  temporary=$(mktemp "$index.XXXXXX") || return 1
+  if "$AH_SCAN" > "$temporary"; then mv -f "$temporary" "$index"; else rm -f "$temporary"; return 1; fi
+}
+
+filter_index() {
+  local index=$1 query=${2:-}
+  [[ -f "$index" ]] || return 0
+  if [[ -z "$query" ]]; then cat "$index"; return; fi
+  # fzf cannot search fields hidden by --with-nth. Rank the full metadata here,
+  # then let the visible fzf select compact rows without re-filtering them.
+  FZF_DEFAULT_OPTS= FZF_DEFAULT_OPTS_FILE= fzf --filter="$query" \
+    --delimiter='\t' --nth=5 --tiebreak=begin,length,index < "$index" || true
+}
+
+snapshot() {
+  local index=$1 root=$2 generation lines state pane target display search title
+  mkdir -p "$root" || return 1
+  generation=$(mktemp -d "$root/capture.XXXXXX") || return 1
+  lines=$(option @agent-picker-grep-lines 5000)
+  case "$lines" in ''|*[!0-9]*) lines=5000 ;; esac
+  if (( lines < 1 || lines > 50000 )); then lines=5000; fi
+  refresh_index "$index" || return 1
+  while IFS=$'\t' read -r state pane target display search title; do
+    [[ "$pane" =~ ^%[0-9]+$ ]] || continue
+    if tmux capture-pane -p -J -S "-$lines" -t "$pane" > "$generation/$pane.txt" 2>/dev/null; then
+      printf '%s\t%s\n' "$target" "$title" > "$generation/$pane.meta"
+    fi
+  done < "$index"
+  printf '%s\n' "$generation" > "$root/current.tmp"
+  mv -f "$root/current.tmp" "$root/current"
+}
+
+grep_rows() {
+  local root=$1 query=${2:-} generation file match line text pane previous= target= title= count=0
+  [[ -n "$query" && -f "$root/current" ]] || return 0
+  IFS= read -r generation < "$root/current"
+  local files=("$generation"/*.txt)
+  [[ -f "${files[0]}" ]] || return 0
+  # Filename is NUL-delimited, so colons/spaces in TMPDIR do not affect parsing.
+  # Invalid regexes while typing simply yield no rows. No model call or indexer.
+  rg --no-config --smart-case --line-number --with-filename --null --color=never \
+    --max-count=200 -- "$query" "${files[@]}" 2>/dev/null |
+  while IFS= read -r -d '' file && IFS= read -r match; do
+    line=${match%%:*}; text=${match#*:}; text=${text//$'\t'/ }
+    pane=${file##*/}; pane=${pane%.txt}
+    if [[ "$file" != "$previous" ]]; then
+      IFS=$'\t' read -r target title < "${file%.txt}.meta"
+      previous=$file
+    fi
+    printf '%s\t%s\t%s\t%s:%s  %s\t%s\n' "$pane" "$target" "$line" "$title" "$line" "${text:0:240}" "$file"
+    count=$((count + 1))
+    (( count < 500 )) || break
+  done
+  return 0
+}
+
+case "${1:-}" in
+  refresh) refresh_index "$2" && filter_index "$2" "${3:-}" ;;
+  filter) filter_index "$2" "${3:-}" ;;
+  snapshot) snapshot "$2" "$3" ;;
+  grep) grep_rows "$2" "${3:-}" ;;
+  refresh-grep) snapshot "$2" "$3" && grep_rows "$3" "${4:-}" ;;
+  preview-grep)
+    [[ -f "${2:-}" && "${3:-}" =~ ^[0-9]+$ ]] || exit 0
+    awk -v hit="$3" 'NR >= hit-10 && NR <= hit+30 {
+      if (NR == hit) printf "\033[36m› %5d  %s\033[0m\n", NR, $0;
+      else printf "  %5d  %s\n", NR, $0;
+    }' "$2" ;;
+  *) fail 'Usage: agent-search {refresh|filter|snapshot|grep|refresh-grep|preview-grep} ...'; exit 1 ;;
+esac

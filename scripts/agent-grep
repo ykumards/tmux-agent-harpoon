@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Live regex search over a temporary snapshot of active agents' scrollback.
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+command -v rg >/dev/null 2>&1 || { fail 'Conversation search needs ripgrep (rg).'; exit 1; }
+"$AH_SEARCH" snapshot "$AH_INDEX" "$AH_GREP_ROOT" || exit 1
+picker_ui --disabled --no-sort --delimiter='\t' --with-nth=4 --ansi \
+  --prompt='Grep › ' --header='Recent pane scrollback · regex · smart case' \
+  --footer='enter open   ^r refresh   esc back
+^d/^u scroll   up to 500 matches' \
+  --preview='"$AH_SEARCH" preview-grep {5} {3}' \
+  --preview-window="right,$(option @agent-picker-preview-width 70%),border-left,noinfo" \
+  --bind='change:untrack-current+reload("$AH_SEARCH" grep "$AH_GREP_ROOT" {q}),ctrl-r:track-current+reload("$AH_SEARCH" refresh-grep "$AH_INDEX" "$AH_GREP_ROOT" {q})+refresh-preview,ctrl-j:down,ctrl-k:up,ctrl-d:preview-half-page-down,ctrl-u:preview-half-page-up' < /dev/null

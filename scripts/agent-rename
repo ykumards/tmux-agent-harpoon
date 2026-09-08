@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# An explicit picker label survives agent-written terminal titles; no agent config changes.
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+[[ $# == 2 ]] || exit 1
+pane=$1
+label=$(picker_ui --disabled --print-query --query="$2" --prompt='Name › ' \
+  --header='Name this conversation' --footer='enter save   ^u clear   esc back' --bind='ctrl-u:clear-query' < /dev/null)
+status=$?
+(( status <= 1 )) || exit "$status"
+if [[ -z "$label" ]]; then
+  tmux set-option -pu -t "$pane" @agent-harpoon-label
+else
+  tmux set-option -p -t "$pane" @agent-harpoon-label "$label"
+fi

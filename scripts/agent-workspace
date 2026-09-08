@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Create exactly one window, or run its agent and leave a shell when it exits.
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+
+if [[ "${1:-}" == --run ]]; then
+  shift
+  agent=$1 command=$2 shell=$3
+  # These are explicit, trusted launcher commands from the user's tmux config.
+  # Directory names and row titles are never interpolated into shell commands.
+  "$shell" -lic "$command"
+  status=$?
+  printf '\n[%s exited: %s — shell ready]\n' "$agent" "$status"
+  exec "$shell" -l
+fi
+
+[[ "${1:-}" == --create && $# == 2 ]] || {
+  fail 'Usage: agent-workspace --create AGENT'; exit 1;
+}
+agent=$2
+valid_agent "$agent" || { fail 'Invalid launcher name'; exit 1; }
+launchers | grep -Fx -- "$agent" >/dev/null || { fail 'Unknown launcher'; exit 1; }
+command=$(agent_command "$agent")
+if [[ "$command" == "$agent" ]] && ! command -v "$agent" >/dev/null 2>&1; then
+  fail "$agent is not on PATH. Install it or configure @agent-picker-command-$agent."
+  exit 1
+fi
+origin=${AH_ORIGIN:-${TMUX_PANE:-}}
+[[ -n "$origin" ]] || { fail 'Open the picker from a tmux pane.'; exit 1; }
+cwd=${AH_CWD:-$(tmux display-message -p -t "$origin" '#{pane_current_path}')}
+[[ -d "$cwd" ]] || { fail 'The starting directory no longer exists.'; exit 1; }
+session=${AH_SESSION:-$(tmux display-message -p -t "$origin" '#{session_id}')}
+tmux has-session -t "$session" 2>/dev/null || { fail 'The originating session has closed.'; exit 1; }
+shell=$(tmux show-option -gqv default-shell)
+[[ -x "$shell" ]] || { fail 'The tmux default shell is not executable.'; exit 1; }
+percent=$(option @agent-picker-terminal-width 30)
+case "$percent" in ''|*[!0-9]*) fail 'Terminal width must be a percentage from 10 to 90.'; exit 1 ;; esac
+(( percent >= 10 && percent <= 90 )) || { fail 'Terminal width must be from 10 to 90.'; exit 1; }
+
+# Construct detached first. A failed split rolls back only our newly made window,
+# before any agent has started. IDs keep concurrent clients/window renumbering safe.
+created=$(tmux new-window -d -P -F '#{window_id} #{pane_id}' \
+  -t "$session:" -n "$agent" -c "$cwd" /bin/sleep 60) || exit 1
+read -r window pane <<<"$created"
+ready=0
+cleanup() { if (( ready == 0 )); then tmux kill-window -t "$window" 2>/dev/null || true; fi; }
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+if ! tmux split-window -d -h -l "$percent%" -t "$pane" -c "$cwd" "$shell" -l; then
+  fail 'Could not create the companion terminal (the window may be too narrow).'
+  exit 1
+fi
+tmux select-pane -t "$pane" || exit 1
+tmux respawn-pane -k -t "$pane" -c "$cwd" \
+  "$HARPOON_DIR/scripts/agent-workspace" --run "$agent" "$command" "$shell" || exit 1
+ready=1
+printf '%s\t%s\n' "$pane" "$session"
